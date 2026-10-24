@@ -10,6 +10,8 @@ export const LIMITS = {
   result: 64_000,
   from: 80,
   list: 50,
+  maxTasks: 500,
+  settledRetentionMs: 30 * 24 * 60 * 60 * 1000,
 } as const;
 
 export interface WebhookState {

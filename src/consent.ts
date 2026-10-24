@@ -4,9 +4,13 @@ import {
   type ConsentDescription,
   type OAuthHelpers,
 } from "@cloudflare/workers-oauth-provider";
+import { mailboxStub } from "./mailbox";
+import { rateBucket, SECRET_FAILURE_LIMIT } from "./policy";
 import { authConfigurationError, configuredToken, secretsEqual } from "./secrets";
 
 const SCOPES = ["mailbox", "offline_access"] as const;
+const FRAME_POLICY =
+  "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'";
 
 export function escapeHtml(value: string): string {
   return value.replace(/[&<>"']/g, (char) => `&#${char.charCodeAt(0)};`);
@@ -18,12 +22,8 @@ function page(body: string, headers: Headers): Response {
   responseHeaders.set("cache-control", "no-store");
   responseHeaders.set("x-content-type-options", "nosniff");
   responseHeaders.set("referrer-policy", "no-referrer");
-  if (!responseHeaders.has("content-security-policy")) {
-    responseHeaders.set(
-      "content-security-policy",
-      "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
-    );
-  }
+  responseHeaders.set("x-frame-options", "DENY");
+  responseHeaders.set("content-security-policy", FRAME_POLICY);
   return new Response(body, { status: 200, headers: responseHeaders });
 }
 
@@ -92,23 +92,39 @@ ${config}
 </form>`;
 }
 
-function retryInner(handle: string, scopes: string[], message: string): string {
-  const hiddenScopes = scopes
-    .filter((scope) => (SCOPES as readonly string[]).includes(scope))
-    .map((scope) => `<input type="hidden" name="scope" value="${escapeHtml(scope)}">`)
-    .join("");
+function retryInner(handle: string, scopes: string[], message: string, polish: string, checkboxes: boolean): string {
+  const fields = checkboxes
+    ? scopeFields(scopes)
+    : scopes
+        .filter((scope) => (SCOPES as readonly string[]).includes(scope))
+        .map((scope) => `<input type="hidden" name="scope" value="${escapeHtml(scope)}">`)
+        .join("");
+  const scopeBlock = checkboxes ? `<fieldset><legend>Scopes</legend>${fields}</fieldset>` : fields;
   return `
 <h1>Mailbox token was not accepted</h1>
 <p class="warn">${escapeHtml(message)}</p>
-<p>Token skrzynki nie pasuje. Wpisz go jeszcze raz. Nazwa klienta była na poprzedniej stronie.</p>
+<p>${escapeHtml(polish)}</p>
 <form method="post" action="/authorize">
   <input type="hidden" name="handle" value="${escapeHtml(handle)}">
-  ${hiddenScopes}
+  ${scopeBlock}
   <label>Mailbox token
     <input type="password" name="mailbox_token" autocomplete="current-password" required>
   </label>
   <p><button name="decision" value="approve">Allow / Pozwól</button> <button name="decision" value="deny">Deny / Odmów</button></p>
 </form>`;
+}
+
+function limitedResponse(seconds: number): Response {
+  const body = layout(
+    "Too many attempts",
+    `<h1>Too many attempts</h1>
+<p class="warn">The mailbox token was refused too many times from this network. Try again in ${seconds} seconds.</p>
+<p>Za dużo nieudanych prób z tej sieci. Spróbuj ponownie za ${seconds} sekund.</p>`,
+  );
+  const headers = new Headers();
+  headers.set("retry-after", String(seconds));
+  const response = page(body, headers);
+  return new Response(response.body, { status: 429, headers: response.headers });
 }
 
 function plainProblem(message: string, status: number): Response {
@@ -118,7 +134,7 @@ function plainProblem(message: string, status: number): Response {
   });
 }
 
-export async function handleAuthorize(request: Request, oauth: OAuthHelpers, env: { MCP_AUTH_TOKEN?: string }): Promise<Response> {
+export async function handleAuthorize(request: Request, oauth: OAuthHelpers, env: Env & { MCP_AUTH_TOKEN?: string }): Promise<Response> {
   try {
     if (request.method === "GET") {
       const authRequest = await oauth.parseAuthRequest(request);
@@ -134,7 +150,6 @@ export async function handleAuthorize(request: Request, oauth: OAuthHelpers, env
     const handle = String(form.get("handle") ?? "");
     const decision = String(form.get("decision") ?? "");
     const scopes = form.getAll("scope").map((value) => String(value)).filter((scope) => (SCOPES as readonly string[]).includes(scope));
-    const granted = scopes.length > 0 ? scopes : ["mailbox", "offline_access"];
 
     if (decision !== "approve") {
       const denied = await oauth.denyConsent(request, handle);
@@ -143,24 +158,62 @@ export async function handleAuthorize(request: Request, oauth: OAuthHelpers, env
       return new Response(null, { status: 302, headers });
     }
 
-    const configurationError = authConfigurationError(env);
-    if (configurationError) {
-      return page(layout("Authorize the task mailbox", retryInner(handle, granted, configurationError)), new Headers());
-    }
-    const accepted = await secretsEqual(String(form.get("mailbox_token") ?? ""), configuredToken(env));
-    if (!accepted) {
+    const mailbox = mailboxStub(env);
+    const bucket = rateBucket(request, "consent");
+    const gate = await mailbox.peekRate(bucket, SECRET_FAILURE_LIMIT);
+    if (!gate.allowed) return limitedResponse(gate.retryAfterSeconds);
+
+    if (!scopes.includes("mailbox")) {
       return page(
-        layout("Authorize the task mailbox", retryInner(handle, granted, "That token does not match MCP_AUTH_TOKEN.")),
+        layout(
+          "Authorize the task mailbox",
+          retryInner(
+            handle,
+            scopes,
+            "Select the mailbox scope. offline_access is added only when its box is checked.",
+            "Zaznacz zakres mailbox. offline_access dochodzi tylko wtedy, gdy jego pole jest zaznaczone.",
+            true,
+          ),
+        ),
         new Headers(),
       );
     }
 
-    const approved = await oauth.approveConsent(request, handle, { scope: granted });
+    const configurationError = authConfigurationError(env);
+    if (configurationError) {
+      return page(
+        layout(
+          "Authorize the task mailbox",
+          retryInner(handle, scopes, configurationError, "Token skrzynki nie jest skonfigurowany.", false),
+        ),
+        new Headers(),
+      );
+    }
+    const accepted = await secretsEqual(String(form.get("mailbox_token") ?? ""), configuredToken(env));
+    if (!accepted) {
+      await mailbox.hitRate(bucket, SECRET_FAILURE_LIMIT);
+      return page(
+        layout(
+          "Authorize the task mailbox",
+          retryInner(
+            handle,
+            scopes,
+            "That token does not match MCP_AUTH_TOKEN.",
+            "Token skrzynki nie pasuje. Wpisz go jeszcze raz. Nazwa klienta była na poprzedniej stronie.",
+            false,
+          ),
+        ),
+        new Headers(),
+      );
+    }
+    await mailbox.clearRate(bucket);
+
+    const approved = await oauth.approveConsent(request, handle, { scope: scopes });
     const completed = await oauth.completeAuthorization({
       request: approved.request,
       userId: "mailbox",
       metadata: { connector: "task-mailbox" },
-      scope: approved.request.scope.length > 0 ? approved.request.scope : granted,
+      scope: approved.request.scope.length > 0 ? approved.request.scope : scopes,
       props: { method: "oauth" },
     });
     approved.headers.set("location", completed.redirectTo);

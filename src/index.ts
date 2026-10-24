@@ -1,8 +1,10 @@
-import { OAuthProvider, type OAuthHelpers } from "@cloudflare/workers-oauth-provider";
+import { ExternalTokenError, OAuthProvider, type OAuthHelpers } from "@cloudflare/workers-oauth-provider";
 import { handleAuthorize } from "./consent";
 import { homePage } from "./home";
+import { mailboxStub } from "./mailbox";
 import { mcpHandler } from "./mcp";
 import { OriginError, canonicalOrigin, requestOrigin } from "./origin";
+import { dcrEnabled, rateBucket, REGISTER_GLOBAL_LIMIT, REGISTER_LIMIT, SECRET_FAILURE_LIMIT } from "./policy";
 import { authConfigurationError, configuredToken, secretsEqual } from "./secrets";
 import { webhookConfigured } from "./webhook";
 
@@ -13,9 +15,17 @@ type WorkerEnv = Env & {
   MCP_PUBLIC_URL?: string;
   GROKBOT_WEBHOOK_URL?: string;
   GROKBOT_WEBHOOK_TOKEN?: string;
+  MCP_DISABLE_DCR?: string;
 };
 
 const JSON_HEADERS = { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" };
+
+function tooMany(retryAfterSeconds: number): Response {
+  return Response.json(
+    { error: "Too many attempts from this network. Try again later." },
+    { status: 429, headers: { ...JSON_HEADERS, "retry-after": String(retryAfterSeconds) } },
+  );
+}
 
 function readPin(env: WorkerEnv): { origin: string | null; error: string | null } {
   const raw = env.MCP_PUBLIC_URL?.trim() ?? "";
@@ -46,8 +56,9 @@ function resolveOrigin(request: Request, env: WorkerEnv): { origin: string } | {
   return { origin: pin.origin ?? incoming };
 }
 
-function createProvider(origin: string): OAuthProvider<WorkerEnv> {
+function createProvider(origin: string, env: WorkerEnv): OAuthProvider<WorkerEnv> {
   const resource = `${origin}/mcp`;
+  const registration = dcrEnabled(env) ? { clientRegistrationEndpoint: "/oauth/register" as const } : {};
   return new OAuthProvider<WorkerEnv>({
     apiRoute: "/mcp",
     apiHandler: {
@@ -70,7 +81,7 @@ function createProvider(origin: string): OAuthProvider<WorkerEnv> {
     },
     authorizeEndpoint: "/authorize",
     tokenEndpoint: "/oauth/token",
-    clientRegistrationEndpoint: "/oauth/register",
+    ...registration,
     scopesSupported: ["mailbox", "offline_access"],
     requiredScopes: ["mailbox"],
     clientIdMetadataDocumentEnabled: true,
@@ -81,10 +92,24 @@ function createProvider(origin: string): OAuthProvider<WorkerEnv> {
       resource_name: "Task mailbox",
       bearer_methods_supported: ["header"],
     },
-    resolveExternalToken: async ({ token, env: tokenEnv }) => {
+    resolveExternalToken: async ({ token, request, env: tokenEnv }) => {
+      const mailbox = mailboxStub(tokenEnv);
+      const bucket = rateBucket(request, "secret");
+      const gate = await mailbox.peekRate(bucket, SECRET_FAILURE_LIMIT);
+      if (!gate.allowed) {
+        throw new ExternalTokenError("temporarily_unavailable", {
+          description: "Too many authentication attempts. Try again later.",
+          statusCode: 429,
+          headers: { "retry-after": String(gate.retryAfterSeconds) },
+        });
+      }
       const expected = configuredToken(tokenEnv);
       const matches = await secretsEqual(token, expected);
-      if (!matches) return null;
+      if (!matches) {
+        await mailbox.hitRate(bucket, SECRET_FAILURE_LIMIT);
+        return null;
+      }
+      await mailbox.clearRate(bucket);
       return { props: { method: "bearer" }, audience: resource };
     },
   });
@@ -108,6 +133,7 @@ function health(request: Request, env: WorkerEnv): Response {
       auth: ["bearer", "oauth"],
       authConfigured: authConfigurationError(env) === null,
       webhookConfigured: webhookConfigured(env),
+      dynamicClientRegistration: dcrEnabled(env),
       pinnedOrigin: pin.origin,
       pinError: pin.error,
       requestOrigin: incoming,
@@ -146,8 +172,24 @@ export default {
       return Response.json({ error: resolved.error }, { status: resolved.status, headers: JSON_HEADERS });
     }
 
+    if (url.pathname === "/oauth/register") {
+      if (!dcrEnabled(workerEnv)) {
+        return Response.json(
+          { error: "Dynamic client registration is disabled. Set MCP_DISABLE_DCR empty to turn it back on." },
+          { status: 404, headers: JSON_HEADERS },
+        );
+      }
+      if (request.method === "POST") {
+        const mailbox = mailboxStub(workerEnv);
+        const charge = await mailbox.hitRate(rateBucket(request, "register"), REGISTER_LIMIT);
+        if (!charge.allowed) return tooMany(charge.retryAfterSeconds);
+        const globalCharge = await mailbox.hitRate("register:global", REGISTER_GLOBAL_LIMIT);
+        if (!globalCharge.allowed) return tooMany(globalCharge.retryAfterSeconds);
+      }
+    }
+
     try {
-      return await createProvider(resolved.origin).fetch(request, workerEnv, ctx);
+      return await createProvider(resolved.origin, workerEnv).fetch(request, workerEnv, ctx);
     } catch (error) {
       const message = error instanceof OriginError || error instanceof TypeError ? error.message : "The mailbox could not handle this request.";
       console.error(JSON.stringify({ event: "request_failed", name: error instanceof Error ? error.name : "Error" }));

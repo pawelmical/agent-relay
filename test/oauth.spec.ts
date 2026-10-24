@@ -78,6 +78,26 @@ describe("OAuth connector flow", () => {
     expect(rejected.status).toBe(200);
     expect(await rejected.text()).toContain("does not match");
 
+    const missingScope = await exports.default.fetch(
+      new Request(`${BASE}/authorize`, {
+        method: "POST",
+        redirect: "manual",
+        headers: {
+          "content-type": "application/x-www-form-urlencoded",
+          cookie: cookies,
+          "cf-connecting-ip": "203.0.113.50",
+        },
+        body: new URLSearchParams({
+          handle: handle ?? "",
+          decision: "approve",
+          mailbox_token: TOKEN,
+          scope: "offline_access",
+        }),
+      }),
+    );
+    expect(missingScope.status).toBe(200);
+    expect(await missingScope.text()).toContain("Select the mailbox scope");
+
     const approvedBody = new URLSearchParams();
     approvedBody.set("handle", handle ?? "");
     approvedBody.set("decision", "approve");

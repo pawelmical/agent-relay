@@ -6,6 +6,10 @@ MCP_AUTH_TOKEN=replace-with-a-long-random-token
 # GROKBOT_WEBHOOK_URL=https://example.com/routines/webhook
 # GROKBOT_WEBHOOK_TOKEN=crsr_replace_me
 
+# Optional. Set to true to refuse POST /oauth/register.
+# Claude can still connect with "Use Claude's published identity".
+# MCP_DISABLE_DCR=true
+
 # Optional. Pin the OAuth issuer and MCP audience to one origin.
 # Leave unset to use the host of each incoming request (workers.dev, a custom
 # domain, or http://localhost:8788).

@@ -1,4 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
+import { RATE_WINDOW_MS } from "./policy";
 import {
   LIMITS,
   fail,
@@ -28,6 +29,11 @@ export interface WebhookReceipt {
   ok: boolean | null;
   httpStatus: number | null;
   error: string | null;
+}
+
+export interface RateDecision {
+  allowed: boolean;
+  retryAfterSeconds: number;
 }
 
 /**
@@ -64,6 +70,13 @@ export class Mailbox extends DurableObject<Env> {
       this.ctx.storage.sql.exec(
         "CREATE INDEX IF NOT EXISTS idx_tasks_lookup ON tasks (assignee, status, created_at)",
       );
+      this.ctx.storage.sql.exec(`
+        CREATE TABLE IF NOT EXISTS rate_limits (
+          bucket TEXT PRIMARY KEY,
+          hits INTEGER NOT NULL,
+          window_started_ms INTEGER NOT NULL
+        )
+      `);
     });
   }
 
@@ -75,6 +88,13 @@ export class Mailbox extends DurableObject<Env> {
     if (titleError) return fail(titleError);
     const instructionsError = validateBody(input.instructions, "instructions", LIMITS.instructions);
     if (instructionsError) return fail(instructionsError);
+
+    this.purgeSettled();
+    if (this.countTasks() >= LIMITS.maxTasks) {
+      return fail(
+        `The mailbox already holds ${LIMITS.maxTasks} tasks. Delete one with delete_task, or wait until done and failed tasks older than 30 days age out.`,
+      );
+    }
 
     const now = this.nowIso();
     const id = crypto.randomUUID();
@@ -205,9 +225,88 @@ export class Mailbox extends DurableObject<Env> {
     return ok(toTask(row));
   }
 
+  async delete(id: string): Promise<MailboxResult<{ id: string; deleted: true }>> {
+    const idError = validateTaskId(id);
+    if (idError) return fail(idError);
+    const row = this.row(id);
+    if (!row) return fail(`No task with id ${id}.`);
+    this.ctx.storage.sql.exec("DELETE FROM tasks WHERE id = ?", id);
+    console.log(JSON.stringify({ event: "task_deleted", taskId: id }));
+    return ok({ id, deleted: true });
+  }
+
+  /**
+   * Look at the current window without counting this request.
+   * A bucket at the limit stays closed until the window ends.
+   */
+  async peekRate(bucket: string, limit: number): Promise<RateDecision> {
+    const safe = safeBucket(bucket);
+    if (!safe) return { allowed: false, retryAfterSeconds: Math.ceil(RATE_WINDOW_MS / 1000) };
+    const now = Date.now();
+    const row = this.rateRow(safe);
+    if (!row || now - row.windowStartedMs >= RATE_WINDOW_MS) return { allowed: true, retryAfterSeconds: 0 };
+    if (row.hits >= limit) return { allowed: false, retryAfterSeconds: retryAfter(row.windowStartedMs, now) };
+    return { allowed: true, retryAfterSeconds: 0 };
+  }
+
+  /** Count one attempt. Once the bucket is full, further calls stay refused and do not add hits. */
+  async hitRate(bucket: string, limit: number): Promise<RateDecision> {
+    const safe = safeBucket(bucket);
+    if (!safe) return { allowed: false, retryAfterSeconds: Math.ceil(RATE_WINDOW_MS / 1000) };
+    const now = Date.now();
+    const row = this.rateRow(safe);
+    if (!row || now - row.windowStartedMs >= RATE_WINDOW_MS) {
+      this.ctx.storage.sql.exec(
+        `INSERT INTO rate_limits (bucket, hits, window_started_ms) VALUES (?, 1, ?)
+         ON CONFLICT(bucket) DO UPDATE SET hits = 1, window_started_ms = excluded.window_started_ms`,
+        safe,
+        now,
+      );
+      return { allowed: true, retryAfterSeconds: 0 };
+    }
+    if (row.hits >= limit) return { allowed: false, retryAfterSeconds: retryAfter(row.windowStartedMs, now) };
+    const hits = row.hits + 1;
+    this.ctx.storage.sql.exec("UPDATE rate_limits SET hits = ? WHERE bucket = ?", hits, safe);
+    return { allowed: true, retryAfterSeconds: 0 };
+  }
+
+  async clearRate(bucket: string): Promise<void> {
+    const safe = safeBucket(bucket);
+    if (!safe) return;
+    this.ctx.storage.sql.exec("DELETE FROM rate_limits WHERE bucket = ?", safe);
+  }
+
   /** Test helper. Not registered as an MCP tool. */
   async reset(): Promise<void> {
     this.ctx.storage.sql.exec("DELETE FROM tasks");
+  }
+
+  /** Test helper. Inserts pending rows without going through create, so a cap test can fill the table in one call. */
+  async seedForTests(count: number): Promise<void> {
+    const now = new Date().toISOString();
+    const rows = Math.max(0, Math.min(Math.trunc(count), LIMITS.maxTasks));
+    for (let index = 0; index < rows; index += 1) {
+      this.ctx.storage.sql.exec(
+        `INSERT INTO tasks (
+          id, assignee, author, title, instructions, status, result, error,
+          created_at, updated_at, claimed_at, completed_at,
+          webhook_attempted, webhook_ok, webhook_http_status, webhook_error
+        ) VALUES (?, 'claude', 'test', 'seed', 'seed', 'pending', NULL, NULL, ?, ?, NULL, NULL, 0, NULL, NULL, NULL)`,
+        crypto.randomUUID(),
+        now,
+        now,
+      );
+    }
+  }
+
+  /** Test helper. Moves completed_at so the retention purge can be exercised. */
+  async backdateForTests(id: string, completedAt: string): Promise<void> {
+    this.ctx.storage.sql.exec(
+      `UPDATE tasks SET status = 'done', result = 'old', completed_at = ?, updated_at = ? WHERE id = ?`,
+      completedAt,
+      completedAt,
+      id,
+    );
   }
 
   private transitionError(id: string, verb: string, required: TaskStatus): MailboxResult<Task> {
@@ -229,6 +328,39 @@ export class Mailbox extends DurableObject<Env> {
     this.lastMs = ms;
     return new Date(ms).toISOString();
   }
+
+  private countTasks(): number {
+    const rows = this.ctx.storage.sql.exec("SELECT COUNT(*) AS n FROM tasks").toArray();
+    return Number(rows[0]?.n ?? 0);
+  }
+
+  private purgeSettled(nowMs = Date.now()): void {
+    const cutoff = new Date(nowMs - LIMITS.settledRetentionMs).toISOString();
+    this.ctx.storage.sql.exec(
+      `DELETE FROM tasks
+       WHERE status IN ('done', 'failed') AND completed_at IS NOT NULL AND completed_at < ?`,
+      cutoff,
+    );
+  }
+
+  private rateRow(bucket: string): { hits: number; windowStartedMs: number } | undefined {
+    const rows = this.ctx.storage.sql
+      .exec("SELECT hits, window_started_ms FROM rate_limits WHERE bucket = ?", bucket)
+      .toArray();
+    const row = rows[0];
+    if (!row) return undefined;
+    return { hits: Number(row.hits), windowStartedMs: Number(row.window_started_ms) };
+  }
+}
+
+function safeBucket(bucket: string): string | null {
+  if (bucket.length === 0 || bucket.length > 120) return null;
+  if (/[\u0000-\u001f\u007f]/.test(bucket)) return null;
+  return bucket;
+}
+
+function retryAfter(windowStartedMs: number, now: number): number {
+  return Math.max(1, Math.ceil((windowStartedMs + RATE_WINDOW_MS - now) / 1000));
 }
 
 function textOrNull(value: SqlStorageValue): string | null {

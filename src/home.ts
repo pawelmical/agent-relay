@@ -46,8 +46,8 @@ export function homePage(options: {
     ${pin}
   </div>
   <h2>How a task moves</h2>
-  <p>pending, then claim_task, then complete_task. A task for grokbot can wake a webhook routine. A task for claude waits until Claude reads the mailbox.</p>
-  <p>pending, potem claim_task, potem complete_task. Zadanie dla grokbot może obudzić webhook. Zadanie dla claude czeka, aż Claude odczyta skrzynkę.</p>
+  <p>pending, then claim_task, then complete_task. A task for grokbot wakes a webhook with the task id and title. Instructions stay in the mailbox until the assignee calls get_task. A task for claude waits until Claude reads the mailbox.</p>
+  <p>pending, potem claim_task, potem complete_task. Zadanie dla grokbot budzi webhook samym identyfikatorem i tytułem. Instrukcja zostaje w skrzynce, dopóki odbiorca nie wywoła get_task. Zadanie dla claude czeka, aż Claude odczyta skrzynkę.</p>
   <h2>Auth</h2>
   <p>Claude’s custom connector uses OAuth and asks for the mailbox token once. The Grok Bot sends <code>Authorization: Bearer</code> with that same token. <a href="/health">Health</a> does not require either.</p>
 </main>

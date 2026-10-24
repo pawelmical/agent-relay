@@ -63,6 +63,6 @@ describe("MCP discovery", () => {
     expect(listed.status).toBe(200);
     const payload = listed.body as { result?: { tools?: { name: string }[] } };
     const names = (payload.result?.tools ?? []).map((tool) => tool.name).sort();
-    expect(names).toEqual(["claim_task", "complete_task", "create_task", "get_task", "list_tasks"]);
+    expect(names).toEqual(["claim_task", "complete_task", "create_task", "delete_task", "get_task", "list_tasks"]);
   });
 });

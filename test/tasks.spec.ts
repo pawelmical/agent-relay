@@ -86,10 +86,16 @@ describe("task lifecycle", () => {
     expect(task.webhook?.http_status).toBe(204);
     expect(webhookCalls).toHaveLength(1);
     expect(webhookCalls[0]?.authorization).toBe("Bearer crsr_test_key");
-    const payload = JSON.parse(webhookCalls[0]?.body ?? "{}") as { event: string; task_id: string; instructions: string };
+    const payload = JSON.parse(webhookCalls[0]?.body ?? "{}") as {
+      event: string;
+      task_id: string;
+      title: string;
+      instructions?: string;
+    };
     expect(payload.event).toBe("task.created");
     expect(payload.task_id).toBe(task.id);
-    expect(payload.instructions).toContain("src/auth");
+    expect(payload.title).toBe("Audit the rate limiter");
+    expect(payload.instructions).toBeUndefined();
 
     setWebhookBehavior("down");
     const broken = await callTool("create_task", {
@@ -134,5 +140,58 @@ describe("task lifecycle", () => {
     expect(failedTask.status).toBe("failed");
     expect(failedTask.error).toContain("limiter");
     expect(failedTask.result).toContain("limiter");
+  });
+
+  it("deletes a task, drops finished tasks after 30 days, and refuses a 501st row", async () => {
+    const created = await callTool("create_task", {
+      to: "claude",
+      from: "grokbot",
+      title: "Keep me",
+      instructions: "Still needed.",
+    });
+    const task = created.json as TaskJson;
+    const removed = await callTool("delete_task", { id: task.id });
+    expect(removed.isError).toBe(false);
+    const gone = await callTool("get_task", { id: task.id });
+    expect(gone.isError).toBe(true);
+
+    const aging = await callTool("create_task", {
+      to: "claude",
+      from: "grokbot",
+      title: "Old result",
+      instructions: "This result should age out.",
+    });
+    const recent = await callTool("create_task", {
+      to: "claude",
+      from: "grokbot",
+      title: "Fresh result",
+      instructions: "This result stays.",
+    });
+    const oldId = (aging.json as TaskJson).id;
+    const freshId = (recent.json as TaskJson).id;
+    const mailbox = env.MAILBOX.getByName("shared");
+    const oldStamp = new Date(Date.now() - 31 * 24 * 60 * 60 * 1000).toISOString();
+    const freshStamp = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    await mailbox.backdateForTests(oldId, oldStamp);
+    await mailbox.backdateForTests(freshId, freshStamp);
+    await callTool("create_task", {
+      to: "claude",
+      from: "grokbot",
+      title: "Trigger purge",
+      instructions: "Creating this runs retention.",
+    });
+    expect((await callTool("get_task", { id: oldId })).isError).toBe(true);
+    expect((await callTool("get_task", { id: freshId })).isError).toBe(false);
+
+    await mailbox.reset();
+    await mailbox.seedForTests(500);
+    const overflow = await callTool("create_task", {
+      to: "claude",
+      from: "grokbot",
+      title: "One too many",
+      instructions: "The cap should refuse this.",
+    });
+    expect(overflow.isError).toBe(true);
+    expect(overflow.text).toContain("500");
   });
 });

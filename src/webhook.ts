@@ -1,5 +1,6 @@
-import type { Task } from "./tasks";
 import type { WebhookReceipt } from "./mailbox";
+import type { Task } from "./tasks";
+import { explainWebhookUrl } from "./webhook-guard";
 
 const WEBHOOK_TIMEOUT_MS = 8_000;
 
@@ -12,18 +13,11 @@ export function webhookConfigured(env: WebhookEnv): boolean {
   return Boolean(env.GROKBOT_WEBHOOK_URL?.trim());
 }
 
-function isLoopback(hostname: string): boolean {
-  const host = hostname.toLowerCase();
-  if (host === "localhost" || host === "::1") return true;
-  const parts = host.split(".");
-  if (parts.length !== 4 || parts[0] !== "127") return false;
-  return parts.every((part) => /^\d{1,3}$/.test(part) && Number(part) <= 255);
-}
-
 /**
  * Wake the Grok Bot routine. The URL is operator configuration, not task
- * input. Redirects are not followed, so the webhook token stays on the host
- * that was configured.
+ * input. The body is a doorbell: id and title only, so the routine has to
+ * read instructions with get_task and can treat them as data.
+ * Redirects are not followed, so the webhook token stays on the configured host.
  */
 export async function postGrokWebhook(env: WebhookEnv, task: Task): Promise<WebhookReceipt> {
   const raw = env.GROKBOT_WEBHOOK_URL?.trim() ?? "";
@@ -36,28 +30,16 @@ export async function postGrokWebhook(env: WebhookEnv, task: Task): Promise<Webh
     };
   }
 
-  let target: URL;
-  try {
-    target = new URL(raw);
-  } catch {
+  const refused = explainWebhookUrl(raw);
+  if (refused) {
     return {
       attempted: false,
       ok: null,
       httpStatus: null,
-      error: "GROKBOT_WEBHOOK_URL is not a URL.",
+      error: refused,
     };
   }
-  const loopback = isLoopback(target.hostname);
-  const allowed =
-    target.protocol === "https:" || (target.protocol === "http:" && loopback);
-  if (!allowed) {
-    return {
-      attempted: false,
-      ok: null,
-      httpStatus: null,
-      error: "GROKBOT_WEBHOOK_URL must be https, or http on localhost.",
-    };
-  }
+  const target = new URL(raw);
 
   const headers = new Headers({
     "content-type": "application/json",
@@ -69,12 +51,7 @@ export async function postGrokWebhook(env: WebhookEnv, task: Task): Promise<Webh
   const body = JSON.stringify({
     event: "task.created",
     task_id: task.id,
-    to: task.to,
-    from: task.from,
     title: task.title,
-    instructions: task.instructions,
-    status: task.status,
-    created_at: task.created_at,
   });
 
   try {

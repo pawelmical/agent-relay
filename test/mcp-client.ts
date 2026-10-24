@@ -15,7 +15,13 @@ export function parseRpc(text: string, contentType: string | null): unknown {
   return JSON.parse(last);
 }
 
-export async function rpc(method: string, params: unknown, token = TOKEN, id = 1): Promise<{ status: number; body: unknown; wwwAuthenticate: string | null }> {
+export async function rpc(
+  method: string,
+  params: unknown,
+  token = TOKEN,
+  id = 1,
+  extraHeaders: Record<string, string> = {},
+): Promise<{ status: number; body: unknown; wwwAuthenticate: string | null; retryAfter: string | null }> {
   const response = await exports.default.fetch(
     new Request(`${BASE}/mcp`, {
       method: "POST",
@@ -24,6 +30,7 @@ export async function rpc(method: string, params: unknown, token = TOKEN, id = 1
         authorization: `Bearer ${token}`,
         "content-type": "application/json",
         accept: "application/json, text/event-stream",
+        ...extraHeaders,
       },
       body: JSON.stringify({ jsonrpc: "2.0", id, method, params }),
     }),
@@ -33,6 +40,7 @@ export async function rpc(method: string, params: unknown, token = TOKEN, id = 1
     status: response.status,
     body: text ? parseRpc(text, response.headers.get("content-type")) : null,
     wwwAuthenticate: response.headers.get("www-authenticate"),
+    retryAfter: response.headers.get("retry-after"),
   };
 }
 
