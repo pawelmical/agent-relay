@@ -1,0 +1,29 @@
+{
+  "name": "task-mailbox",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Remote MCP mailbox so Claude and a Grok Bot can hand tasks to each other.",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev --port 8788",
+    "test": "vitest run",
+    "types": "wrangler types",
+    "typecheck": "wrangler types && tsc --noEmit && tsc --noEmit -p test/tsconfig.json",
+    "check": "npm run typecheck && npm test",
+    "deploy": "wrangler deploy"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@cloudflare/workers-oauth-provider": "^1.2.4",
+    "@modelcontextprotocol/server": "2.3.1",
+    "agents": "^0.30.1",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "1.4.7",
+    "@types/node": "^22.20.5",
+    "typescript": "5.9.3",
+    "vitest": "4.1.12",
+    "wrangler": "4.152.0"
+  }
+}

@@ -1,0 +1,12 @@
+# Local secrets for `wrangler dev`. Copy to .dev.vars. Never commit .dev.vars.
+# Generate a token with: openssl rand -hex 32
+MCP_AUTH_TOKEN=replace-with-a-long-random-token
+
+# Optional. When set, creating a task for grokbot POSTs the task here.
+# GROKBOT_WEBHOOK_URL=https://example.com/routines/webhook
+# GROKBOT_WEBHOOK_TOKEN=crsr_replace_me
+
+# Optional. Pin the OAuth issuer and MCP audience to one origin.
+# Leave unset to use the host of each incoming request (workers.dev, a custom
+# domain, or http://localhost:8788).
+# MCP_PUBLIC_URL=http://localhost:8788
