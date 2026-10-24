@@ -204,34 +204,6 @@ Nothing is POSTed. In Claude:
 
 The bot can then `get_task` and read `result`.
 
-## Before you deploy it in public
-
-This is a single-tenant mailbox. One deployment is one trust domain: Claude and one Grok Bot, both allowed to see every task. It is not a multi-user service. Publishing the source is fine. Pointing strangers at your deployed URL is not.
-
-- Generate `MCP_AUTH_TOKEN` with `openssl rand -hex 32`. The values in `vitest.config.ts` (`test-mailbox-token-0123456789`, `crsr_test_key`) are test fixtures. They must not be the production secret.
-- Set `MCP_PUBLIC_URL` to the exact origin you give Claude and the bot. Leave `global_fetch_strictly_public` in `wrangler.jsonc`. That flag blocks fetches of names that resolve to private addresses, including Client ID Metadata Documents. Removing it turns off that protection.
-- Approve the consent page only when you just started the Claude connection, and check the redirect host. A dynamically registered client chooses its own name. The page says when that name is unverified. `offline_access` is granted only if you leave that box checked. The `mailbox` box is required.
-- Eight wrong mailbox tokens or bearer tokens from one network in ten minutes get `429` until the window ends. A correct token from another network still works. Twenty `POST /oauth/register` calls from one network, or one hundred from everyone together, get the same treatment in that ten-minute window. Set `MCP_DISABLE_DCR` when you do not need “Register automatically”.
-- Task text is data. A task can ask the other agent to ignore its routine. The webhook carries `task_id` and `title` only; the routine has to call `get_task`. Read the instructions before you let the agent act on them.
-- The mailbox holds 500 tasks. Call `delete_task`, or wait: `done` and `failed` rows older than 30 days are removed the next time a task is created. Pending rows stay.
-- Keep secrets in `.dev.vars` and `wrangler secret put`. Do not commit `.dev.vars`. Workers logs can contain the outbound webhook URL. That path is often a secret by itself. Application logs record event names, task ids, and HTTP status. They do not record either token, the instructions, or the result.
-
-The bearer comparison hashes both sides with SHA-256 and then uses a timing-safe compare. A wrong consent token redisplays the form and does not consume the OAuth handle. The consent response sends `frame-ancestors 'none'` and `X-Frame-Options: DENY`.
-
-## Security
-
-The shared `MCP_AUTH_TOKEN` is the trust boundary. Anyone who has it can create, claim, complete, and delete every task. The tools do not separate users. Treat the token like a high-entropy secret, not a password you can remember.
-
-## Tests
-
-```bash
-npm test
-```
-
-Vitest runs inside the Workers runtime (`@cloudflare/vitest-plugin`). The suite covers the five tools and the pending → in_progress → done/failed transitions, a failed and a redirected webhook, bearer rejection, OAuth discovery, dynamic client registration, the consent page (wrong token, then a refreshable access token), and `tools/list` with that access token.
-
----
-
 ## Polski
 
 Zdalny serwer MCP na Cloudflare Workers. Claude i Grok Bot mają jedną kolejkę zadań: każda strona może zostawić pracę drugiej, przejąć ją i zapisać wynik.
@@ -435,29 +407,3 @@ Nic nie jest wysyłane POSTem. W Claude:
 > list_tasks for claude with status pending. Claim the confirm task, answer it, then complete_task with outcome done.
 
 Bot może potem wywołać `get_task` i przeczytać `result`.
-
-### Zanim wystawisz to publicznie
-
-To skrzynka dla jednej pary. Jedno wdrożenie to jedna strefa zaufania: Claude i jeden Grok Bot, oba widzą każde zadanie. To nie jest usługa dla wielu osób. Publikacja źródeł jest w porządku. Podawanie obcym adresu swojego wdrożenia już nie.
-
-- `MCP_AUTH_TOKEN` generuj przez `openssl rand -hex 32`. Wartości z `vitest.config.ts` (`test-mailbox-token-0123456789`, `crsr_test_key`) służą testom. Nie mogą być sekretem produkcyjnym.
-- Ustaw `MCP_PUBLIC_URL` na dokładnie ten origin, który podajesz Claude i botowi. Zostaw `global_fetch_strictly_public` w `wrangler.jsonc`. Ta flaga blokuje pobieranie nazw, które wskazują na adresy prywatne, także dokumentów Client ID Metadata. Jej usunięcie wyłącza tę ochronę.
-- Stronę zgody zatwierdzaj tylko wtedy, gdy sam przed chwilą zacząłeś łączenie Claude, i sprawdź host przekierowania. Klient z dynamicznej rejestracji sam wybiera nazwę. Strona mówi, gdy ta nazwa nie jest zweryfikowana. `offline_access` jest nadawany tylko, gdy to pole zostaje zaznaczone. Pole `mailbox` jest wymagane.
-- Osiem złych tokenów skrzynki albo bearerów z jednej sieci w ciągu dziesięciu minut dostaje `429` do końca okna. Poprawny token z innej sieci nadal działa. Dwadzieścia wywołań `POST /oauth/register` z jednej sieci albo sto ze wszystkich naraz w tym samym dziesięciominutowym oknie jest traktowane tak samo. Ustaw `MCP_DISABLE_DCR`, gdy nie potrzebujesz „Register automatically”.
-- Tekst zadania to dane. Zadanie może poprosić drugiego agenta, żeby zignorował rutynę. Webhook niesie tylko `task_id` i `title`; rutyna musi wywołać `get_task`. Przeczytaj instrukcję, zanim agent według niej zadziała.
-- Skrzynka mieści 500 zadań. Wołaj `delete_task` albo poczekaj: wiersze `done` i `failed` starsze niż 30 dni znikają przy następnym `create_task`. Wiersze oczekujące zostają.
-- Sekrety trzymaj w `.dev.vars` i w `wrangler secret put`. Nie commituj `.dev.vars`. Logi Workers mogą zawierać adres wychodzącego webhooka. Ta ścieżka często sama jest sekretem. Logi aplikacji zapisują nazwy zdarzeń, identyfikatory zadań i status HTTP. Nie zapisują żadnego z tokenów, instrukcji ani wyniku.
-
-Porównanie bearer liczy SHA-256 obu stron, a potem używa porównania odpornego na czas. Zły token na stronie zgody pokazuje formularz ponownie i nie zużywa uchwytu OAuth. Odpowiedź zgody wysyła `frame-ancestors 'none'` i `X-Frame-Options: DENY`.
-
-### Bezpieczeństwo
-
-Wspólny `MCP_AUTH_TOKEN` jest granicą zaufania. Kto go ma, może tworzyć, przejmować, kończyć i usuwać każde zadanie. Narzędzia nie rozdzielają użytkowników. Traktuj token jak sekret o wysokiej entropii, nie jak hasło, które da się zapamiętać.
-
-### Testy
-
-```bash
-npm test
-```
-
-Vitest działa w środowisku Workers (`@cloudflare/vitest-plugin`). Zestaw obejmuje pięć narzędzi i przejścia pending → in_progress → done/failed, nieudany webhook i webhook z przekierowaniem, odrzucenie złego bearer, odkrywanie OAuth, dynamiczną rejestrację klienta, stronę zgody (zły token, potem access token z refresh tokenem) oraz `tools/list` tym access tokenem.
