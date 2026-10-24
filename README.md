@@ -1,4 +1,4 @@
-# Task mailbox
+# agent-relay
 
 A remote [MCP](https://modelcontextprotocol.io) server on Cloudflare Workers. Claude and a Grok Bot share one task queue: either side can leave work for the other, claim it, and write the result back.
 
