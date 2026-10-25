@@ -1,8 +1,18 @@
 {
-  "name": "task-mailbox",
+  "name": "agent-relay",
   "version": "1.0.0",
   "private": true,
-  "description": "Remote MCP mailbox so Claude and a Grok Bot can hand tasks to each other.",
+  "description": "Remote MCP mailbox so any agents can hand tasks to each other.",
+  "cloudflare": {
+    "bindings": {
+      "MCP_AUTH_TOKEN": {
+        "description": "Shared mailbox secret, at least 16 characters. Generate one with `openssl rand -hex 32` and paste it here. This is the only required secret. OAuth consent and bearer clients both use it."
+      },
+      "OAUTH_KV": {
+        "description": "KV namespace for OAuth clients and grants. Deploy to Cloudflare creates it from the placeholder id. An existing deployment must keep its current namespace id."
+      }
+    }
+  },
   "type": "module",
   "scripts": {
     "dev": "wrangler dev --port 8788",

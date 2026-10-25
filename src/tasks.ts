@@ -1,14 +1,18 @@
-export const PARTIES = ["grokbot", "claude"] as const;
 export const STATUSES = ["pending", "in_progress", "done", "failed"] as const;
 
-export type Party = (typeof PARTIES)[number];
+/**
+ * Assignee and sender names. A letter, then letters or digits, 2–32 characters.
+ * No hyphen, dot, underscore, or uppercase, so a name cannot imitate a host,
+ * a path, or `claude` with a look-alike character.
+ */
+export const AGENT_NAME_PATTERN = /^[a-z][a-z0-9]{1,31}$/;
+
 export type TaskStatus = (typeof STATUSES)[number];
 
 export const LIMITS = {
   title: 200,
   instructions: 16_000,
   result: 64_000,
-  from: 80,
   list: 50,
   maxTasks: 500,
   settledRetentionMs: 30 * 24 * 60 * 60 * 1000,
@@ -23,7 +27,7 @@ export interface WebhookState {
 
 export interface Task {
   id: string;
-  to: Party;
+  to: string;
   from: string;
   title: string;
   instructions: string;
@@ -69,8 +73,12 @@ export function fail<T>(error: string): MailboxResult<T> {
 const UUID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-export function isParty(value: string): value is Party {
-  return (PARTIES as readonly string[]).includes(value);
+export function isAgentName(value: string): boolean {
+  return AGENT_NAME_PATTERN.test(value);
+}
+
+export function agentNameError(field: string): string {
+  return `${field} must be a lowercase agent name of 2-32 letters and digits, starting with a letter. Examples: grokbot, claude, gpt, cursor.`;
 }
 
 export function isStatus(value: string): value is TaskStatus {
@@ -109,10 +117,13 @@ export function validateBody(value: string, field: string, max: number): string 
 }
 
 export function toTask(row: TaskRow): Task {
-  const assignee = isParty(row.assignee) ? row.assignee : "claude";
+  // Rows written before agent names were opened are grokbot or claude, both of
+  // which match AGENT_NAME_PATTERN. Anything else stored by a hand edit still
+  // reads back as claude, which is what this function did for unknown values.
+  const assignee = isAgentName(row.assignee) ? row.assignee : "claude";
   const status = isStatus(row.status) ? row.status : "pending";
   let webhook: WebhookState | null = null;
-  if (assignee === "grokbot" && (row.webhook_attempted === 1 || row.webhook_error !== null)) {
+  if (row.webhook_attempted === 1 || row.webhook_error !== null) {
     webhook = {
       attempted: row.webhook_attempted === 1,
       ok: row.webhook_ok === null ? null : row.webhook_ok === 1,

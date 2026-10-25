@@ -2,8 +2,9 @@ import { DurableObject } from "cloudflare:workers";
 import { RATE_WINDOW_MS } from "./policy";
 import {
   LIMITS,
+  agentNameError,
   fail,
-  isParty,
+  isAgentName,
   isStatus,
   ok,
   toTask,
@@ -11,7 +12,6 @@ import {
   validateLabel,
   validateTaskId,
   type MailboxResult,
-  type Party,
   type Task,
   type TaskRow,
   type TaskStatus,
@@ -37,9 +37,9 @@ export interface RateDecision {
 }
 
 /**
- * One SQLite object holds the whole mailbox. Claude and the Grok Bot share a
- * single queue, so one Durable Object is the coordination atom: claims and
- * status changes stay consistent without a second index.
+ * One SQLite object holds the whole mailbox. Every agent shares a single
+ * queue, so one Durable Object is the coordination atom: claims and status
+ * changes stay consistent without a second index.
  */
 export class Mailbox extends DurableObject<Env> {
   private lastMs = 0;
@@ -47,43 +47,13 @@ export class Mailbox extends DurableObject<Env> {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     ctx.blockConcurrencyWhile(async () => {
-      this.ctx.storage.sql.exec(`
-        CREATE TABLE IF NOT EXISTS tasks (
-          id TEXT PRIMARY KEY,
-          assignee TEXT NOT NULL,
-          author TEXT NOT NULL,
-          title TEXT NOT NULL,
-          instructions TEXT NOT NULL,
-          status TEXT NOT NULL,
-          result TEXT,
-          error TEXT,
-          created_at TEXT NOT NULL,
-          updated_at TEXT NOT NULL,
-          claimed_at TEXT,
-          completed_at TEXT,
-          webhook_attempted INTEGER NOT NULL DEFAULT 0,
-          webhook_ok INTEGER,
-          webhook_http_status INTEGER,
-          webhook_error TEXT
-        )
-      `);
-      this.ctx.storage.sql.exec(
-        "CREATE INDEX IF NOT EXISTS idx_tasks_lookup ON tasks (assignee, status, created_at)",
-      );
-      this.ctx.storage.sql.exec(`
-        CREATE TABLE IF NOT EXISTS rate_limits (
-          bucket TEXT PRIMARY KEY,
-          hits INTEGER NOT NULL,
-          window_started_ms INTEGER NOT NULL
-        )
-      `);
+      this.ensureSchema();
     });
   }
 
   async create(input: CreateTaskInput): Promise<MailboxResult<Task>> {
-    if (!isParty(input.to)) return fail("to must be grokbot or claude.");
-    const authorError = validateLabel(input.from, "from", LIMITS.from);
-    if (authorError) return fail(authorError);
+    if (!isAgentName(input.to)) return fail(agentNameError("to"));
+    if (!isAgentName(input.from)) return fail(agentNameError("from"));
     const titleError = validateLabel(input.title, "title", LIMITS.title);
     if (titleError) return fail(titleError);
     const instructionsError = validateBody(input.instructions, "instructions", LIMITS.instructions);
@@ -107,7 +77,7 @@ export class Mailbox extends DurableObject<Env> {
       RETURNING *`,
       id,
       input.to,
-      input.from.trim(),
+      input.from,
       input.title.trim(),
       input.instructions.trim(),
       now,
@@ -120,7 +90,7 @@ export class Mailbox extends DurableObject<Env> {
   }
 
   async list(assignee: string | null, status: string | null, limit: number): Promise<MailboxResult<Task[]>> {
-    if (assignee !== null && !isParty(assignee)) return fail("for must be grokbot or claude.");
+    if (assignee !== null && !isAgentName(assignee)) return fail(agentNameError("for"));
     if (status !== null && !isStatus(status)) {
       return fail("status must be pending, in_progress, done, or failed.");
     }
@@ -299,6 +269,40 @@ export class Mailbox extends DurableObject<Env> {
     }
   }
 
+  /**
+   * Test helper. Inserts rows the way a database from before this change
+   * already holds them, then runs the schema SQL again. Not an MCP tool.
+   */
+  async seedHistoricalTasksForTests(): Promise<{ grokbotId: string; claudeId: string }> {
+    const grokbotId = crypto.randomUUID();
+    const claudeId = crypto.randomUUID();
+    const created = "2024-01-15T12:00:00.000Z";
+    this.ctx.storage.sql.exec(
+      `INSERT INTO tasks (
+        id, assignee, author, title, instructions, status, result, error,
+        created_at, updated_at, claimed_at, completed_at,
+        webhook_attempted, webhook_ok, webhook_http_status, webhook_error
+      ) VALUES (?, 'grokbot', 'claude', 'Legacy grok', 'Old grok instructions', 'pending', NULL, NULL, ?, ?, NULL, NULL, 1, 1, 204, NULL)`,
+      grokbotId,
+      created,
+      created,
+    );
+    this.ctx.storage.sql.exec(
+      `INSERT INTO tasks (
+        id, assignee, author, title, instructions, status, result, error,
+        created_at, updated_at, claimed_at, completed_at,
+        webhook_attempted, webhook_ok, webhook_http_status, webhook_error
+      ) VALUES (?, 'claude', 'grokbot', 'Legacy claude', 'Old claude instructions', 'in_progress', NULL, NULL, ?, ?, ?, NULL, 0, NULL, NULL, NULL)`,
+      claudeId,
+      created,
+      created,
+      created,
+    );
+    this.ensureSchema();
+    this.ensureSchema();
+    return { grokbotId, claudeId };
+  }
+
   /** Test helper. Moves completed_at so the retention purge can be exercised. */
   async backdateForTests(id: string, completedAt: string): Promise<void> {
     this.ctx.storage.sql.exec(
@@ -307,6 +311,44 @@ export class Mailbox extends DurableObject<Env> {
       completedAt,
       id,
     );
+  }
+
+  /**
+   * Additive and idempotent. `CREATE TABLE IF NOT EXISTS` leaves an existing
+   * tasks table, including rows for grokbot and claude, untouched. There is
+   * no new Durable Object migration tag: class Mailbox and tag v1 stay.
+   */
+  private ensureSchema(): void {
+    this.ctx.storage.sql.exec(`
+      CREATE TABLE IF NOT EXISTS tasks (
+        id TEXT PRIMARY KEY,
+        assignee TEXT NOT NULL,
+        author TEXT NOT NULL,
+        title TEXT NOT NULL,
+        instructions TEXT NOT NULL,
+        status TEXT NOT NULL,
+        result TEXT,
+        error TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        claimed_at TEXT,
+        completed_at TEXT,
+        webhook_attempted INTEGER NOT NULL DEFAULT 0,
+        webhook_ok INTEGER,
+        webhook_http_status INTEGER,
+        webhook_error TEXT
+      )
+    `);
+    this.ctx.storage.sql.exec(
+      "CREATE INDEX IF NOT EXISTS idx_tasks_lookup ON tasks (assignee, status, created_at)",
+    );
+    this.ctx.storage.sql.exec(`
+      CREATE TABLE IF NOT EXISTS rate_limits (
+        bucket TEXT PRIMARY KEY,
+        hits INTEGER NOT NULL,
+        window_started_ms INTEGER NOT NULL
+      )
+    `);
   }
 
   private transitionError(id: string, verb: string, required: TaskStatus): MailboxResult<Task> {
@@ -396,4 +438,4 @@ export function mailboxStub(env: Env) {
   return env.MAILBOX.getByName("shared");
 }
 
-export type { Party, Task };
+export type { Task };

@@ -13,10 +13,20 @@ describe("public routes", () => {
 
     const health = await exports.default.fetch(`${BASE}/health`);
     expect(health.status).toBe(200);
-    const body = (await health.json()) as { ready: boolean; auth: string[]; webhookConfigured: boolean };
+    const body = (await health.json()) as {
+      ready: boolean;
+      auth: string[];
+      webhookConfigured: boolean;
+      service: string;
+      agentWebhooks: number;
+      agentWebhooksError: string | null;
+    };
     expect(body.ready).toBe(true);
     expect(body.auth).toEqual(["bearer", "oauth"]);
     expect(body.webhookConfigured).toBe(true);
+    expect(body.service).toBe("task-mailbox");
+    expect(body.agentWebhooks).toBe(2);
+    expect(body.agentWebhooksError).toBeNull();
   });
 });
 

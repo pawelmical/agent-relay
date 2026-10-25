@@ -6,7 +6,7 @@ import { mcpHandler } from "./mcp";
 import { OriginError, canonicalOrigin, requestOrigin } from "./origin";
 import { dcrEnabled, rateBucket, REGISTER_GLOBAL_LIMIT, REGISTER_LIMIT, SECRET_FAILURE_LIMIT } from "./policy";
 import { authConfigurationError, configuredToken, secretsEqual } from "./secrets";
-import { webhookConfigured } from "./webhook";
+import { readAgentWebhooks, webhookConfigured } from "./webhook";
 
 export { Mailbox } from "./mailbox";
 
@@ -15,6 +15,7 @@ type WorkerEnv = Env & {
   MCP_PUBLIC_URL?: string;
   GROKBOT_WEBHOOK_URL?: string;
   GROKBOT_WEBHOOK_TOKEN?: string;
+  AGENT_WEBHOOKS?: string;
   MCP_DISABLE_DCR?: string;
 };
 
@@ -124,6 +125,7 @@ function health(request: Request, env: WorkerEnv): Response {
     incoming = null;
   }
   const ready = authConfigurationError(env) === null && pin.error === null;
+  const agentWebhooks = readAgentWebhooks(env.AGENT_WEBHOOKS);
   return Response.json(
     {
       ok: true,
@@ -133,6 +135,8 @@ function health(request: Request, env: WorkerEnv): Response {
       auth: ["bearer", "oauth"],
       authConfigured: authConfigurationError(env) === null,
       webhookConfigured: webhookConfigured(env),
+      agentWebhooks: agentWebhooks.targets.size,
+      agentWebhooksError: agentWebhooks.error,
       dynamicClientRegistration: dcrEnabled(env),
       pinnedOrigin: pin.origin,
       pinError: pin.error,
