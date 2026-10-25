@@ -25,8 +25,8 @@ describe("any agent", () => {
     await env.MAILBOX.getByName("shared").reset();
   });
 
-  it("rejects names that are not lowercase slugs", async () => {
-    for (const name of ["Claude", "grok bot", "someone-else", "gpt.bot", "a", "4gpt", "сlaude"]) {
+  it("rejects assignee names that are not slugs after trim and lowercase", async () => {
+    for (const name of ["grok bot", "gpt.bot", "a", "4gpt", "claude--bot", "claude-", "сlaude"]) {
       const created = await callTool("create_task", {
         to: name,
         from: "claude",
@@ -37,13 +37,54 @@ describe("any agent", () => {
     }
     const badFrom = await callTool("create_task", {
       to: "claude",
-      from: "Claude",
+      from: "!!!",
       title: "Nope",
-      instructions: "Sender name is not a slug.",
+      instructions: "Sender name has no letters.",
     });
     expect(badFrom.isError).toBe(true);
-    const badFilter = await callTool("list_tasks", { for: "GPT" });
+    const badFilter = await callTool("list_tasks", { for: "not a name" });
     expect(badFilter.isError).toBe(true);
+  });
+
+  it("accepts Claude, Grok Bot, and hyphenated names without changing grokbot or claude", async () => {
+    const claudeTask = await callTool("create_task", {
+      to: "Claude",
+      from: "Claude",
+      title: "Same claude",
+      instructions: "Upper case is the same assignee.",
+    });
+    expect(claudeTask.isError).toBe(false);
+    const claude = claudeTask.json as TaskJson;
+    expect(claude.to).toBe("claude");
+    expect(claude.from).toBe("claude");
+    expect(claude.webhook).toBeNull();
+    const listed = await callTool("list_tasks", { for: " Claude " });
+    const ids = (listed.json as { tasks: TaskJson[] }).tasks.map((task) => task.id);
+    expect(ids).toContain(claude.id);
+
+    const labeled = await callTool("create_task", {
+      to: "claude-right-hand",
+      from: "Grok Bot",
+      title: "Hyphenated assignee",
+      instructions: "The sender label becomes a slug.",
+    });
+    expect(labeled.isError).toBe(false);
+    const hand = labeled.json as TaskJson;
+    expect(hand.to).toBe("claude-right-hand");
+    expect(hand.from).toBe("grok-bot");
+    expect(hand.webhook).toBeNull();
+
+    const woken = await callTool("create_task", {
+      to: " Grokbot ",
+      from: "claude-right-hand",
+      title: "Still grokbot",
+      instructions: "Trim and lowercase keep the grokbot webhook.",
+    });
+    const grok = woken.json as TaskJson;
+    expect(grok.to).toBe("grokbot");
+    expect(grok.from).toBe("claude-right-hand");
+    expect(grok.webhook?.ok).toBe(true);
+    expect(webhookCalls.map((call) => call.url)).toEqual(["https://hooks.test/grok"]);
   });
 
   it("runs a cursor task and wakes only that agent's webhook", async () => {

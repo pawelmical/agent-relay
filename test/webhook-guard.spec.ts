@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { dcrEnabled } from "../src/policy";
-import { isAgentName, toTask, type TaskRow } from "../src/tasks";
+import { isAgentName, normalizeAssignee, normalizeSender, toTask, type TaskRow } from "../src/tasks";
 import { readAgentWebhooks } from "../src/webhook";
 import { explainWebhookUrl } from "../src/webhook-guard";
 
@@ -26,13 +26,29 @@ describe("webhook target filter", () => {
 });
 
 describe("agent names", () => {
-  it("accepts the original names and other lowercase slugs", () => {
-    for (const name of ["grokbot", "claude", "gpt", "cursor", "gemini", "gpt4", "a".repeat(32)]) {
+  it("accepts the original names and hyphenated slugs", () => {
+    for (const name of ["grokbot", "claude", "gpt", "cursor", "gemini", "gpt4", "claude-right-hand", "someone-else", "a".repeat(32)]) {
       expect(isAgentName(name)).toBe(true);
     }
-    for (const name of ["Claude", "grok bot", "someone-else", "gpt.bot", "a", "4gpt", "a".repeat(33), "сlaude", "../x", ""]) {
+    for (const name of ["Claude", "grok bot", "gpt.bot", "a", "4gpt", "claude--bot", "claude-", "-claude", "a".repeat(33), "сlaude", "../x", ""]) {
       expect(isAgentName(name)).toBe(false);
     }
+  });
+
+  it("normalizes assignees softly and senders from legacy labels", () => {
+    expect(normalizeAssignee(" Claude ")).toBe("claude");
+    expect(normalizeAssignee("Grokbot")).toBe("grokbot");
+    expect(normalizeAssignee("claude-right-hand")).toBe("claude-right-hand");
+    expect(normalizeAssignee("Grok Bot")).toBeNull();
+    expect(normalizeAssignee("claude--bot")).toBeNull();
+
+    expect(normalizeSender("Claude")).toBe("claude");
+    expect(normalizeSender("Grok Bot")).toBe("grok-bot");
+    expect(normalizeSender("claude-right-hand")).toBe("claude-right-hand");
+    expect(normalizeSender("Grok__Bot")).toBe("grok-bot");
+    expect(normalizeSender("  (Grok Bot!)  ")).toBe("grok-bot");
+    expect(normalizeSender("!!!")).toBeNull();
+    expect(normalizeSender("a")).toBeNull();
   });
 
   it("still reads a non-slug assignee as claude", () => {

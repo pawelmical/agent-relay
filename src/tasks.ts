@@ -1,11 +1,13 @@
 export const STATUSES = ["pending", "in_progress", "done", "failed"] as const;
 
 /**
- * Assignee and sender names. A letter, then letters or digits, 2–32 characters.
- * No hyphen, dot, underscore, or uppercase, so a name cannot imitate a host,
- * a path, or `claude` with a look-alike character.
+ * Canonical agent name: a letter, then letters, digits, or single hyphens.
+ * 2–32 characters. No leading, trailing, or doubled hyphen.
+ * `grokbot` and `claude` match this exactly.
  */
-export const AGENT_NAME_PATTERN = /^[a-z][a-z0-9]{1,31}$/;
+export const AGENT_NAME_PATTERN = /^[a-z][a-z0-9-]{1,31}$/;
+/** Raw `to` / `for` / `from` input cap. Matches the old `from` label limit. */
+export const AGENT_INPUT_MAX = 80;
 
 export type TaskStatus = (typeof STATUSES)[number];
 
@@ -74,11 +76,38 @@ const UUID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export function isAgentName(value: string): boolean {
-  return AGENT_NAME_PATTERN.test(value);
+  return AGENT_NAME_PATTERN.test(value) && !value.endsWith("-") && !value.includes("--");
 }
 
 export function agentNameError(field: string): string {
-  return `${field} must be a lowercase agent name of 2-32 letters and digits, starting with a letter. Examples: grokbot, claude, gpt, cursor.`;
+  return `${field} must be an agent name of 2-32 characters: a letter, then letters, digits, or hyphens, with no leading, trailing, or doubled hyphen. It is trimmed and lowercased. Examples: grokbot, claude, claude-right-hand.`;
+}
+
+export function senderNameError(): string {
+  return "from did not contain an agent name. Letters, digits, and hyphens are kept; spaces and underscores become hyphens.";
+}
+
+/** Trim and lowercase `to` / `for`. Returns the canonical name, or null. */
+export function normalizeAssignee(value: string): string | null {
+  const normalized = value.trim().toLowerCase();
+  if (normalized.length === 0 || normalized.length > AGENT_INPUT_MAX) return null;
+  return isAgentName(normalized) ? normalized : null;
+}
+
+/**
+ * Legacy `from` labels are not rejected when they can be turned into a slug.
+ * Lowercase, spaces and underscores become hyphens, other characters drop,
+ * repeats and edge hyphens collapse, then the result is cut to 32 characters.
+ */
+export function normalizeSender(value: string): string | null {
+  const trimmed = value.trim();
+  if (trimmed.length === 0 || trimmed.length > AGENT_INPUT_MAX) return null;
+  let name = trimmed.toLowerCase();
+  name = name.replace(/[\s_]+/g, "-");
+  name = name.replace(/[^a-z0-9-]/g, "");
+  name = name.replace(/-+/g, "-").replace(/^-+|-+$/g, "");
+  if (name.length > 32) name = name.slice(0, 32).replace(/-+$/g, "");
+  return isAgentName(name) ? name : null;
 }
 
 export function isStatus(value: string): value is TaskStatus {

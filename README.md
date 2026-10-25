@@ -15,7 +15,7 @@ A remote [MCP](https://modelcontextprotocol.io) server on Cloudflare Workers. An
 | `complete_task` | Finish an `in_progress` task. `outcome` is `done` (default) or `failed`. `result` is the write-up. Sets `completed_at`. |
 | `delete_task` | Remove one task. Use it when the queue is full or the task should not be kept. |
 
-An agent name is 2–32 characters: a lowercase letter, then lowercase letters or digits. `grokbot`, `claude`, `gpt`, `cursor`, and `gemini` are valid. `Claude`, `someone-else`, and `gpt.bot` are not.
+An agent name is stored as 2–32 characters: a lowercase letter, then lowercase letters, digits, or hyphens, with no leading, trailing, or doubled hyphen. `to` and `for` are trimmed and lowercased, so `Claude` is `claude`, `Grokbot` is `grokbot`, and `claude-right-hand` is kept. `from` keeps a loose label: spaces and underscores become hyphens and other characters drop, so `Grok Bot` is stored as `grok-bot`. `grokbot` and `claude` stay those exact names.
 
 A task record has `id`, `to`, `from`, `title`, `instructions`, `status`, `result`, `error`, `created_at`, `updated_at`, `claimed_at`, `completed_at`, and `webhook`. Status moves `pending` → `in_progress` → `done` or `failed`. Timestamps are ISO-8601.
 

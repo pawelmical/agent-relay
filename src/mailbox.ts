@@ -4,8 +4,10 @@ import {
   LIMITS,
   agentNameError,
   fail,
-  isAgentName,
   isStatus,
+  normalizeAssignee,
+  normalizeSender,
+  senderNameError,
   ok,
   toTask,
   validateBody,
@@ -52,8 +54,10 @@ export class Mailbox extends DurableObject<Env> {
   }
 
   async create(input: CreateTaskInput): Promise<MailboxResult<Task>> {
-    if (!isAgentName(input.to)) return fail(agentNameError("to"));
-    if (!isAgentName(input.from)) return fail(agentNameError("from"));
+    const assignee = normalizeAssignee(input.to);
+    if (!assignee) return fail(agentNameError("to"));
+    const author = normalizeSender(input.from);
+    if (!author) return fail(senderNameError());
     const titleError = validateLabel(input.title, "title", LIMITS.title);
     if (titleError) return fail(titleError);
     const instructionsError = validateBody(input.instructions, "instructions", LIMITS.instructions);
@@ -76,8 +80,8 @@ export class Mailbox extends DurableObject<Env> {
       ) VALUES (?, ?, ?, ?, ?, 'pending', NULL, NULL, ?, ?, NULL, NULL, 0, NULL, NULL, NULL)
       RETURNING *`,
       id,
-      input.to,
-      input.from,
+      assignee,
+      author,
       input.title.trim(),
       input.instructions.trim(),
       now,
@@ -85,12 +89,13 @@ export class Mailbox extends DurableObject<Env> {
     );
     const row = rows[0];
     if (!row) return fail("The task could not be stored.");
-    console.log(JSON.stringify({ event: "task_created", taskId: id, to: input.to }));
+    console.log(JSON.stringify({ event: "task_created", taskId: id, to: assignee }));
     return ok(toTask(row));
   }
 
   async list(assignee: string | null, status: string | null, limit: number): Promise<MailboxResult<Task[]>> {
-    if (assignee !== null && !isAgentName(assignee)) return fail(agentNameError("for"));
+    const canonicalAssignee = assignee === null ? null : normalizeAssignee(assignee);
+    if (assignee !== null && !canonicalAssignee) return fail(agentNameError("for"));
     if (status !== null && !isStatus(status)) {
       return fail("status must be pending, in_progress, done, or failed.");
     }
@@ -101,9 +106,9 @@ export class Mailbox extends DurableObject<Env> {
 
     const clauses: string[] = [];
     const binds: string[] = [];
-    if (assignee) {
+    if (canonicalAssignee) {
       clauses.push("assignee = ?");
-      binds.push(assignee);
+      binds.push(canonicalAssignee);
     }
     if (status) {
       clauses.push("status = ?");
