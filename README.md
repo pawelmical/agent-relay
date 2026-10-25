@@ -1,45 +1,47 @@
 # agent-relay
 
-A remote [MCP](https://modelcontextprotocol.io) server on Cloudflare Workers. Claude and a Grok Bot share one task queue: either side can leave work for the other, claim it, and write the result back.
+A remote [MCP](https://modelcontextprotocol.io) server on Cloudflare Workers. Any MCP agent can leave a task for any other agent, claim it, and write the result back. `grokbot` and `claude` are the original names and still work the same way.
 
-Claude on a Pro plan connects with OAuth (Customize → Connectors → custom connector). The Grok Bot connects with the same shared secret as a bearer token, and can wake from a webhook when a task is addressed to it.
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/pawelmical/agent-relay)
 
 ## What you get
 
 | Tool | What it does |
 | --- | --- |
-| `create_task` | Leave a task. `to` is `grokbot` or `claude`. `from` names the sender. `title` and `instructions` are the work. |
-| `list_tasks` | Newest first. Optional `for` (the assignee), `status`, and `limit` (default 20, max 50). |
+| `create_task` | Leave a task. `to` is the assignee's name, `from` is yours. `title` and `instructions` are the work. |
+| `list_tasks` | Newest first. Pass `for` as **your** name to see work waiting for you. Optional `status` and `limit` (default 20, max 50). |
 | `get_task` | One task by UUID, including the result and webhook delivery. |
 | `claim_task` | `pending` → `in_progress`. Sets `claimed_at`. Fails unless the task is still pending. |
 | `complete_task` | Finish an `in_progress` task. `outcome` is `done` (default) or `failed`. `result` is the write-up. Sets `completed_at`. |
 | `delete_task` | Remove one task. Use it when the queue is full or the task should not be kept. |
 
+An agent name is stored as 2–32 characters: a lowercase letter, then lowercase letters, digits, or hyphens, with no leading, trailing, or doubled hyphen. `to` and `for` are trimmed and lowercased, so `Claude` is `claude`, `Grokbot` is `grokbot`, and `claude-right-hand` is kept. `from` keeps a loose label: spaces and underscores become hyphens and other characters drop, so `Grok Bot` is stored as `grok-bot`. `grokbot` and `claude` stay those exact names.
+
 A task record has `id`, `to`, `from`, `title`, `instructions`, `status`, `result`, `error`, `created_at`, `updated_at`, `claimed_at`, `completed_at`, and `webhook`. Status moves `pending` → `in_progress` → `done` or `failed`. Timestamps are ISO-8601.
 
-Limits: title 200 characters, instructions 16,000, result 64,000, `from` 80, list page 50, 500 tasks in the mailbox. `done` and `failed` tasks are deleted 30 days after `completed_at`. Pending work is kept until someone deletes it.
+Limits: title 200 characters, instructions 16,000, result 64,000, list page 50, 500 tasks in the mailbox. `done` and `failed` tasks are deleted 30 days after `completed_at`. Pending work is kept until someone deletes it.
 
-Tasks live in one SQLite Durable Object, so claim and complete stay consistent when both agents talk at once. OAuth clients and grants live in KV. `/` is a short bilingual page. `GET /health` is public and reports whether the token and webhook are configured. It does not reveal secrets.
+Tasks live in one SQLite Durable Object, so claim and complete stay consistent when agents talk at once. OAuth clients and grants live in KV. `/` is a short page. `GET /health` is public and reports whether the token and webhooks are configured. It does not reveal secrets.
 
-## Auth: which path each client uses
+## Auth
 
-Both paths accept the same secret, `MCP_AUTH_TOKEN` (at least 16 characters).
+Both paths accept the same secret, `MCP_AUTH_TOKEN` (at least 16 characters). There is one shared token on purpose. A second per-agent token would not hide tasks from other holders of the shared token, so it is not a separate mode.
 
-**Claude needs OAuth.** On Pro, open Customize → Connectors → Add custom connector and choose **Sign in now**. Claude discovers this server’s authorization server, and the consent page asks you to paste `MCP_AUTH_TOKEN` once. Claude then stores its own access token and refresh token. Scopes are `mailbox` and `offline_access`.
+**OAuth.** The client discovers this server's authorization server. The consent page asks you to paste `MCP_AUTH_TOKEN` once. The client then stores its own access token and refresh token. Scopes are `mailbox` and `offline_access`.
 
-Dynamic client registration (`POST /oauth/register`) and Client ID Metadata Documents are both enabled, so either **Use Claude’s published identity** or **Register automatically** works. Published identity is the one Claude recommends.
+Dynamic client registration (`POST /oauth/register`) and Client ID Metadata Documents are both enabled. Leave `MCP_DISABLE_DCR` unset unless you want to refuse registration.
 
-Request-header credentials are a Claude beta and are not on every account. If that section is missing, OAuth is the path that works. If it is present and you choose **No sign-in**, add a header named `Authorization` whose value is `Bearer <MCP_AUTH_TOKEN>` (include the word `Bearer`). Do not also set that header on an OAuth connection: Claude’s access token is already the `Authorization` value.
-
-**The Grok Bot uses the bearer token.** Tell the bot to add the MCP URL with `Authorization: Bearer <MCP_AUTH_TOKEN>`. There is no browser consent step for the bot.
+**Bearer token.** Send `Authorization: Bearer <MCP_AUTH_TOKEN>` on every request. There is no browser consent step.
 
 The comparison hashes both sides with SHA-256 and then uses a timing-safe compare. A missing or short token is treated as unset, and `/mcp` answers `401` with `WWW-Authenticate` pointing at the protected-resource metadata.
 
 The OAuth issuer and the MCP audience are the origin of the request (`https://task-mailbox.<account>.workers.dev`, a custom domain, or `http://localhost:8788`). Set `MCP_PUBLIC_URL` to an origin with no path when you want to pin that audience. `http://` is accepted only for loopback hosts.
 
+Eight bad tokens from one network in ten minutes answer `429`.
+
 ## Webhook
 
-When `create_task` addresses `grokbot` and `GROKBOT_WEBHOOK_URL` is set, the worker POSTs a doorbell. Instructions stay in the mailbox so the wake-up body is not a second system prompt:
+A wake-up POST happens only when that assignee has a URL configured. The body is a doorbell. Instructions stay in the mailbox:
 
 ```json
 {
@@ -49,13 +51,40 @@ When `create_task` addresses `grokbot` and `GROKBOT_WEBHOOK_URL` is set, the wor
 }
 ```
 
-If `GROKBOT_WEBHOOK_TOKEN` is set, the request includes `Authorization: Bearer <that token>`. The URL must be `https`, or `http` on localhost. Redirects are not followed. The call waits up to 8 seconds. A failed delivery does not drop the task: it stays `pending`, and `webhook` on the task records `attempted`, `ok`, `http_status`, and `error`. Tasks for `claude` do not call the webhook. Claude reads the mailbox when you ask it to.
+`grokbot` uses `GROKBOT_WEBHOOK_URL` and, if set, `GROKBOT_WEBHOOK_TOKEN` as `Authorization: Bearer <that token>`. A `grokbot` key inside `AGENT_WEBHOOKS` is ignored, so those two secrets keep their meaning.
+
+Any other agent uses the `AGENT_WEBHOOKS` secret, a JSON object:
+
+```json
+{
+  "cursor": { "url": "https://example.com/hooks/cursor", "token": "optional" },
+  "gpt": { "url": "https://example.com/hooks/gpt" }
+}
+```
+
+The URL must be `https`, or `http` on localhost. Private, link-local, and special-use hosts are refused before fetch. Redirects are not followed. The call waits up to 8 seconds. A failed delivery does not drop the task: it stays `pending`, and `webhook` on the task records `attempted`, `ok`, `http_status`, and `error`. An agent with no URL, including `claude` unless you add one, does not call a webhook.
 
 ## Deploy
 
-This repo does not deploy itself. You run Wrangler against your own Cloudflare account.
+### One click
 
-Requires Node.js 22+, a Cloudflare account, and [Wrangler](https://developers.cloudflare.com/workers/wrangler/) (already a dev dependency).
+The button above clones this repo into your GitHub or GitLab account, creates the Worker `task-mailbox`, provisions the `OAUTH_KV` namespace and the `Mailbox` SQLite Durable Object from `wrangler.jsonc`, and asks for `MCP_AUTH_TOKEN`.
+
+That prompt is the only required value. Generate it first:
+
+```bash
+openssl rand -hex 32
+```
+
+Paste the hex string into the deploy screen. Do not keep the placeholder from `.dev.vars.example`. Optional secrets (`GROKBOT_WEBHOOK_URL`, `GROKBOT_WEBHOOK_TOKEN`, `AGENT_WEBHOOKS`, `MCP_DISABLE_DCR`, `MCP_PUBLIC_URL`) are commented out there, so the button does not ask for them. Set them later with `npx wrangler secret put <NAME>` in the cloned repo if you need them.
+
+When the deploy finishes, the connector URL is `https://task-mailbox.<account>.workers.dev/mcp`. Check `https://<host>/health`. `ready` and `authConfigured` should be `true`.
+
+The button URL is the [Deploy to Cloudflare](https://developers.cloudflare.com/workers/platform/deploy-buttons/) form: `https://deploy.workers.cloudflare.com/?url=https://github.com/pawelmical/agent-relay`. KV ids in the committed `wrangler.jsonc` are the `0000…` placeholders that flow replaces. You do not create a namespace by hand.
+
+### By hand
+
+Requires Node.js 22+, a Cloudflare account, and Wrangler (a dev dependency). The Worker name comes from `wrangler.jsonc` and stays `task-mailbox`.
 
 ```bash
 npm install
@@ -64,49 +93,45 @@ npx wrangler kv namespace create OAUTH_KV
 npx wrangler kv namespace create OAUTH_KV --preview
 ```
 
-Put the printed ids into `wrangler.jsonc` under `kv_namespaces`, replacing both `0000…` placeholders (`id` from the first command, `preview_id` from the second). The Durable Object migration in that file creates the SQLite class `Mailbox` on the first deploy.
+Put the printed ids into `wrangler.jsonc` under `kv_namespaces` (`id` from the first command, `preview_id` from the second). Wrangler treats a non-empty id as already chosen, so the placeholder does not provision itself on `wrangler deploy`. The Durable Object migration `v1` creates the SQLite class `Mailbox` on the first deploy.
 
 ```bash
 openssl rand -hex 32
 npx wrangler secret put MCP_AUTH_TOKEN
 ```
 
-Paste the hex string when prompted. Optional, after you have the Grok Bot routine URL and key (see below):
+Paste the hex string when prompted. Optional:
 
 ```bash
 npx wrangler secret put GROKBOT_WEBHOOK_URL
 npx wrangler secret put GROKBOT_WEBHOOK_TOKEN
-```
-
-Optional. Leave dynamic registration on unless you only use Claude’s published identity. Set this to `true`, `1`, or `yes` to refuse `POST /oauth/register`:
-
-```bash
+npx wrangler secret put AGENT_WEBHOOKS
 npx wrangler secret put MCP_DISABLE_DCR
-```
-
-Optional pin, origin only, no path. Set this on a public deployment so the OAuth issuer does not follow whichever hostname reached the Worker:
-
-```bash
 npx wrangler secret put MCP_PUBLIC_URL
-# example value: https://task-mailbox.<account>.workers.dev
 ```
 
-`wrangler secret put` publishes a new Worker version. Set the secrets, then deploy so the version you serve includes them:
+`MCP_DISABLE_DCR` accepts `true`, `1`, or `yes` to refuse `POST /oauth/register`. `MCP_PUBLIC_URL` is an origin with no path, for example `https://task-mailbox.<account>.workers.dev`.
+
+`wrangler secret put` publishes a new Worker version. Set the secrets, then deploy:
 
 ```bash
 npm test
 npx wrangler deploy
 ```
 
-The command prints the workers.dev host. The connector URL is:
+### Upgrade an existing deployment
 
-```text
-https://task-mailbox.<account>.workers.dev/mcp
+From the checkout that already serves `https://task-mailbox.pawelmical.workers.dev`:
+
+```bash
+git pull
+npm install
+npx wrangler deploy
 ```
 
-`<account>` is your workers.dev subdomain. A custom domain is optional; if you add one, set `MCP_PUBLIC_URL` to that origin and give Claude and the Grok Bot `https://<your-domain>/mcp`.
+This pull does not change `wrangler.jsonc`. Keep your local `OAUTH_KV` id and `preview_id`. If git conflicts on that file: keep your `id` and `preview_id`.
 
-Check `https://<host>/health`. `ready` should be `true`, and `authConfigured` should be `true`.
+No new secret is required. `MCP_AUTH_TOKEN`, `GROKBOT_WEBHOOK_URL`, `GROKBOT_WEBHOOK_TOKEN`, `MCP_DISABLE_DCR`, and `MCP_PUBLIC_URL` mean what they meant. Existing OAuth grants stay in the same KV namespace. Set `AGENT_WEBHOOKS` only when another agent should wake on a URL.
 
 ### Local
 
@@ -118,7 +143,7 @@ npm run dev
 
 Dev listens on `http://localhost:8788`. `.dev.vars` is gitignored. Tests do not read it; they inject bindings in `vitest.config.ts`.
 
-Claude and the Grok Bot cannot reach this machine’s localhost. Use `wrangler deploy` and the public `https://…/mcp` URL for both connectors. Local checks:
+Remote agents cannot reach this machine's localhost. Use the public `https://…/mcp` URL for connectors. Local checks:
 
 ```bash
 curl -s http://localhost:8788/health
@@ -131,41 +156,58 @@ curl -s http://localhost:8788/mcp \
 
 `npm run typecheck` regenerates `worker-configuration.d.ts` and typechecks `src/` and `test/`.
 
-## Connect Claude
+## Connect any MCP agent
 
-Claude needs the public `https://…/mcp` URL. These steps match the current Pro dialog ([custom remote connectors](https://claude.com/docs/connectors/custom/remote-mcp)).
+Point the client at `https://<host>/mcp`. Use OAuth (consent page, paste `MCP_AUTH_TOKEN`, scopes `mailbox` and `offline_access`) or the bearer header. Then tell the agent its name and to call `list_tasks` with `for` set to that name.
 
-1. In Claude, open **Customize → Connectors**.
-2. Click **+ Add**, then **Add custom connector**.
-3. Name it `Task mailbox`.
-4. MCP server URL: `https://task-mailbox.<account>.workers.dev/mcp`. Continue.
-5. Under Authentication, choose **Sign in now**.
-6. Under OAuth client, choose **Use Claude’s published identity**. **Register automatically** also works with this server.
-7. Click **Add**. Claude opens the mailbox consent page.
-8. Paste `MCP_AUTH_TOKEN` into the password field. Leave `mailbox` and `offline_access` checked. Click **Allow**.
-9. In a chat, open **+ → Connectors** and turn **Task mailbox** on.
+### ChatGPT
 
-Ask Claude to call `list_tasks` with `for` set to `claude`. An empty `tasks` array means the connector is signed in.
+ChatGPT adds a remote server from **Plugins → + → Add custom MCP server**. Paste the public `https://…/mcp` URL. Under authentication choose **OAuth** (the documented choices are OAuth, no authentication, or mixed). Leave registration on dynamic client registration or Client ID Metadata Documents. The consent page asks for `MCP_AUTH_TOKEN`. Install the plugin and ask it to call `list_tasks` with `for` set to `gpt`.
 
-If your dialog is still the single screen (name, URL, Advanced), the same choices live under Advanced: sign in with OAuth, and leave client id/secret empty so Claude registers itself or uses its published identity.
+### Cursor
 
-Team and Enterprise plans add the connector from **Organization settings → Connectors → Add → Custom → Web** first. Members then use **Customize → Connectors → Connect**. The consent page still asks for the shared mailbox token, so everyone who connects can see and finish every task.
+Cursor's remote MCP config is `url` plus optional `headers` in `~/.cursor/mcp.json` (all projects) or `.cursor/mcp.json` (this project):
 
-## Connect the Grok Bot
+```json
+{
+  "mcpServers": {
+    "agent-relay": {
+      "url": "https://task-mailbox.<account>.workers.dev/mcp",
+      "headers": {
+        "Authorization": "Bearer <MCP_AUTH_TOKEN>"
+      }
+    }
+  }
+}
+```
 
-The bot runs in the cloud, so the MCP URL must be public HTTPS. There is no settings form for a custom server: say it in chat, for example:
+Omit `headers` if you want Cursor's OAuth flow instead. This server advertises dynamic registration and Client ID Metadata Documents. Ask Cursor to call `list_tasks` with `for` set to `cursor`.
+
+### Claude
+
+Claude on a Pro plan uses **Customize → Connectors → Add custom connector** ([custom remote connectors](https://claude.com/docs/connectors/custom/remote-mcp)).
+
+1. Name it `Task mailbox`.
+2. MCP server URL: `https://task-mailbox.<account>.workers.dev/mcp`.
+3. Choose **Sign in now**, then **Use Claude's published identity**. **Register automatically** also works.
+4. Click **Add** and paste `MCP_AUTH_TOKEN` on the consent page. Leave `mailbox` and `offline_access` checked.
+5. In a chat, open **+ → Connectors** and turn **Task mailbox** on.
+
+Ask Claude to call `list_tasks` with `for` set to `claude`.
+
+If the dialog is still the single screen (name, URL, Advanced), the same choices live under Advanced. Team and Enterprise plans add the connector from **Organization settings → Connectors → Add → Custom → Web** first. The consent page still asks for the shared token, so everyone who connects can see and finish every task.
+
+Request-header credentials are a Claude beta. If that section is missing, OAuth is the path that works. If you choose **No sign-in**, the header value is `Bearer <MCP_AUTH_TOKEN>`. Do not also set that header on an OAuth connection.
+
+### Grok Bot
+
+The bot runs in the cloud, so the MCP URL must be public HTTPS. Say it in chat, for example:
 
 > Add this MCP server: `https://task-mailbox.<account>.workers.dev/mcp`. Transport is streamable HTTP. Send this header on every request: `Authorization: Bearer <MCP_AUTH_TOKEN>`.
 
-Confirm when the bot asks. New tools show up on the next message. Ask it to call `list_tasks`.
+Confirm when the bot asks. Ask it to call `list_tasks` with `for` set to `grokbot`.
 
-### Routine that wakes on a new task
-
-1. Open the bot, then **View conversation details → Routines**.
-2. Create a routine. Under **When to run**, add a **webhook**.
-3. Use an instruction like the one below. Save, leave the routine **Active**, then open it again.
-4. Copy **POST to** and the key (`crsr_…`). The panel also shows the full `Authorization: Bearer crsr_…` header.
-5. Put the POST URL in `GROKBOT_WEBHOOK_URL` and the key in `GROKBOT_WEBHOOK_TOKEN` (`wrangler secret put`, then `wrangler deploy` if you have not deployed since).
+To wake it, create a routine with a webhook (**View conversation details → Routines → When to run → webhook**). Copy **POST to** and the key (`crsr_…`) into `GROKBOT_WEBHOOK_URL` and `GROKBOT_WEBHOOK_TOKEN`.
 
 Routine instruction:
 
@@ -177,27 +219,25 @@ When event is "task.created":
 3. Do the work described in the task.
 4. Call complete_task with the same id. Use outcome "done" and put the write-up in result.
 5. If you cannot finish, call complete_task with outcome "failed" and explain why in result.
-Do not create a new task unless the task text itself asks for follow-up work for Claude (to "claude", from "grokbot").
+Do not create a new task unless the task text itself asks for follow-up work for another agent.
 ```
 
 A task for `grokbot` still exists if the webhook returns non-2xx. The bot can also poll `list_tasks` with `for` `grokbot` and `status` `pending`.
 
-## Example: both directions
+## Example
 
-**Claude delegates to the Grok Bot.** In a Claude chat with the connector enabled:
+**One agent delegates to another.** With the connector enabled:
 
-> Create a task for grokbot. from is claude. Title: "Audit the login page". Instructions: "List concrete issues in the login flow and stop after the list."
+> Create a task for cursor. from is claude. Title: "Audit the login page". Instructions: "List concrete issues in the login flow and stop after the list."
 
-`create_task` returns the task id and a `webhook` object. The routine claims the task, does the work, and calls `complete_task`. Later, in Claude:
+`create_task` returns the task id and, when `cursor` has a URL in `AGENT_WEBHOOKS`, a `webhook` object. The other agent claims the task and calls `complete_task`. Later:
 
 > get_task for that id and summarize the result.
 
-**The Grok Bot leaves work for Claude.** In the bot chat:
+**The other direction.** 
 
-> create_task with to "claude", from "grokbot", title "Confirm the audit", instructions "Read the login-page audit you already stored and say whether you agree."
+> create_task with to "claude", from "cursor", title "Confirm the audit", instructions "Read the login-page audit and say whether you agree."
 
-Nothing is POSTed. In Claude:
+Nothing is POSTed unless `claude` has its own URL. In Claude:
 
 > list_tasks for claude with status pending. Claim the confirm task, answer it, then complete_task with outcome done.
-
-The bot can then `get_task` and read `result`.

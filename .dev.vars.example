@@ -1,10 +1,16 @@
 # Local secrets for `wrangler dev`. Copy to .dev.vars. Never commit .dev.vars.
+# The Deploy to Cloudflare button asks for every uncommented key below.
 # Generate a token with: openssl rand -hex 32
-MCP_AUTH_TOKEN=replace-with-a-long-random-token
+MCP_AUTH_TOKEN=replace-with-openssl-rand-hex-32
 
-# Optional. When set, creating a task for grokbot POSTs the task here.
+# Optional. When set, creating a task for grokbot POSTs the doorbell here.
+# A grokbot entry inside AGENT_WEBHOOKS is ignored; these two secrets win.
 # GROKBOT_WEBHOOK_URL=https://example.com/routines/webhook
 # GROKBOT_WEBHOOK_TOKEN=crsr_replace_me
+
+# Optional. JSON object of other agent names to { "url", "token"? }.
+# Same doorbell body as grokbot: event, task_id, title. https, or http on localhost.
+# AGENT_WEBHOOKS={"cursor":{"url":"https://example.com/hooks/cursor","token":"optional"}}
 
 # Optional. Set to true to refuse POST /oauth/register.
 # Claude can still connect with "Use Claude's published identity".

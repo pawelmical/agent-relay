@@ -125,19 +125,19 @@ export function isDisallowedWebhookHost(hostname: string): boolean {
   return false;
 }
 
-export function explainWebhookUrl(raw: string): string | null {
+export function explainWebhookUrl(raw: string, label = "GROKBOT_WEBHOOK_URL"): string | null {
   let target: URL;
   try {
     target = new URL(raw);
   } catch {
-    return "GROKBOT_WEBHOOK_URL is not a URL.";
+    return `${label} is not a URL.`;
   }
   if (isDisallowedWebhookHost(target.hostname)) {
-    return "GROKBOT_WEBHOOK_URL points at a private, link-local, or special-use host.";
+    return `${label} points at a private, link-local, or special-use host.`;
   }
   const allowed = target.protocol === "https:" || (target.protocol === "http:" && isLoopbackHost(target.hostname));
   if (!allowed) {
-    return "GROKBOT_WEBHOOK_URL must be https, or http on localhost.";
+    return `${label} must be https, or http on localhost.`;
   }
   return null;
 }

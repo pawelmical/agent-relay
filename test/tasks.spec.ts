@@ -123,7 +123,7 @@ describe("task lifecycle", () => {
     expect(missing.isError).toBe(true);
 
     const badParty = await callTool("create_task", {
-      to: "someone-else",
+      to: "not a name",
       from: "claude",
       title: "Nope",
       instructions: "This party is not allowed.",

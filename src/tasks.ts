@@ -1,14 +1,20 @@
-export const PARTIES = ["grokbot", "claude"] as const;
 export const STATUSES = ["pending", "in_progress", "done", "failed"] as const;
 
-export type Party = (typeof PARTIES)[number];
+/**
+ * Canonical agent name: a letter, then letters, digits, or single hyphens.
+ * 2–32 characters. No leading, trailing, or doubled hyphen.
+ * `grokbot` and `claude` match this exactly.
+ */
+export const AGENT_NAME_PATTERN = /^[a-z][a-z0-9-]{1,31}$/;
+/** Raw `to` / `for` / `from` input cap. Matches the old `from` label limit. */
+export const AGENT_INPUT_MAX = 80;
+
 export type TaskStatus = (typeof STATUSES)[number];
 
 export const LIMITS = {
   title: 200,
   instructions: 16_000,
   result: 64_000,
-  from: 80,
   list: 50,
   maxTasks: 500,
   settledRetentionMs: 30 * 24 * 60 * 60 * 1000,
@@ -23,7 +29,7 @@ export interface WebhookState {
 
 export interface Task {
   id: string;
-  to: Party;
+  to: string;
   from: string;
   title: string;
   instructions: string;
@@ -69,8 +75,39 @@ export function fail<T>(error: string): MailboxResult<T> {
 const UUID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-export function isParty(value: string): value is Party {
-  return (PARTIES as readonly string[]).includes(value);
+export function isAgentName(value: string): boolean {
+  return AGENT_NAME_PATTERN.test(value) && !value.endsWith("-") && !value.includes("--");
+}
+
+export function agentNameError(field: string): string {
+  return `${field} must be an agent name of 2-32 characters: a letter, then letters, digits, or hyphens, with no leading, trailing, or doubled hyphen. It is trimmed and lowercased. Examples: grokbot, claude, claude-right-hand.`;
+}
+
+export function senderNameError(): string {
+  return "from did not contain an agent name. Letters, digits, and hyphens are kept; spaces and underscores become hyphens.";
+}
+
+/** Trim and lowercase `to` / `for`. Returns the canonical name, or null. */
+export function normalizeAssignee(value: string): string | null {
+  const normalized = value.trim().toLowerCase();
+  if (normalized.length === 0 || normalized.length > AGENT_INPUT_MAX) return null;
+  return isAgentName(normalized) ? normalized : null;
+}
+
+/**
+ * Legacy `from` labels are not rejected when they can be turned into a slug.
+ * Lowercase, spaces and underscores become hyphens, other characters drop,
+ * repeats and edge hyphens collapse, then the result is cut to 32 characters.
+ */
+export function normalizeSender(value: string): string | null {
+  const trimmed = value.trim();
+  if (trimmed.length === 0 || trimmed.length > AGENT_INPUT_MAX) return null;
+  let name = trimmed.toLowerCase();
+  name = name.replace(/[\s_]+/g, "-");
+  name = name.replace(/[^a-z0-9-]/g, "");
+  name = name.replace(/-+/g, "-").replace(/^-+|-+$/g, "");
+  if (name.length > 32) name = name.slice(0, 32).replace(/-+$/g, "");
+  return isAgentName(name) ? name : null;
 }
 
 export function isStatus(value: string): value is TaskStatus {
@@ -109,10 +146,13 @@ export function validateBody(value: string, field: string, max: number): string 
 }
 
 export function toTask(row: TaskRow): Task {
-  const assignee = isParty(row.assignee) ? row.assignee : "claude";
+  // Rows written before agent names were opened are grokbot or claude, both of
+  // which match AGENT_NAME_PATTERN. Anything else stored by a hand edit still
+  // reads back as claude, which is what this function did for unknown values.
+  const assignee = isAgentName(row.assignee) ? row.assignee : "claude";
   const status = isStatus(row.status) ? row.status : "pending";
   let webhook: WebhookState | null = null;
-  if (assignee === "grokbot" && (row.webhook_attempted === 1 || row.webhook_error !== null)) {
+  if (row.webhook_attempted === 1 || row.webhook_error !== null) {
     webhook = {
       attempted: row.webhook_attempted === 1,
       ok: row.webhook_ok === null ? null : row.webhook_ok === 1,
